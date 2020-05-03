@@ -88,7 +88,7 @@ class Warehouse:
         """Placeholder error handler to be overriden as needed.
         Can raise a custom class Exception or anything else."""
         self.teardown(from_error=True)
-        logger.debug('*** SCRIPT EXITED AFTER %.4fs ***' % (time.time() - self._to))
+        logger.debug('*** SCRIPT EXITED AFTER %.4fs ***' % (time.time() - self._t0))
         sys.exit(1)
 
 
@@ -278,6 +278,7 @@ class Warehouse:
                 sql = """SELECT * FROM (%s) _tmp WHERE %s > '%s'""" % (sql, incremental_field, incremental_field_max_value)
         
         # Run the query against our own db and save it to a local csv file in data/ (we use sed for some csv tab-escaping)
+        # Note: this is pretty crude if we have a lot of bad string/varchar fields, should probably use a proper csv parser.
         logger.info('Running SQL query...\n%s\n' % sql)
         filepath = os.path.join(os.path.dirname(__file__), 'data', '%s.csv' % self.integrity_field)
         logger.debug('Saving SQL results to file %s' % filepath)
