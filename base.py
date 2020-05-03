@@ -23,7 +23,20 @@ BQ_DATASET_ID = 'data_warehouse'
 
 class Warehouse:
     """
-    
+    See example.py for an example usage. The main method is called `run()`.
+
+    This requires $ bq command line tool, to download that, do:
+       
+       $ sudo snap install google-cloud-sdk
+       
+    And the first time you use it, you will need to authenticate:
+
+        $ gcloud auth login
+
+    And finally, to set the correct project, run
+        
+        $ gcloud set project first-outlet-750
+
     """
     def __init__(self):
 
@@ -70,6 +83,15 @@ class Warehouse:
         self.sql_formatted = None # for the application, after all formatting has been done
 
 
+
+    def error_handler(self, *args, **kwargs):
+        """Placeholder error handler to be overriden as needed.
+        Can raise a custom class Exception or anything else."""
+        self.teardown(from_error=True)
+        sys.exit(1)
+
+
+
     def run(self, script_name=None, integrity_field=None, sql=None, sql_args=None, partition_on_field=None, incremental_field=None):
         """This is the wrapper that calls all the methods.
         Overwrite any of these methods in the individual scripts that call this."""
@@ -92,99 +114,85 @@ class Warehouse:
         self.teardown()
         logger.debug('*** FINISHED SCRIPT -- Took %.4fs to complete ***' % (time.time() - self._t0))
 
-    
-    def teardown(self, from_error=False):
-        """What to do at the end of the script, for example, to send
-        an email or remove one of the data or process files."""
-        # Remove data file?
-        pass # keep for now -- easier for debugging to start
 
-        # Remove running pid file?
-        if self._lockfile: os.remove(self._lockfile)
 
-        # Add a completed file?
-        if not from_error:
-            completed_filepath = f'{self._base_folder}/proc/completed/{self.integrity_field}'
-            Path(f'{self._base_folder}/proc/completed/{self.integrity_field}').touch()
-
-        # Send an email or post to an endpoint?
-        pass
+    def set_script_name(self, name=None):
+        """This will set both the script name and table name. By default, filename of script."""
+        if name: self.script_name = name; return
+        script_name = [arg for arg in sys.argv if arg.endswith('.py')]
+        if not script_name: raise RuntimeError('Set a custom `script_name` method or run with a file arg')
+        self.script_name = script_name[0].split('_')[1].replace('.py','')
 
 
 
-    def error_handler(self, *args, **kwargs):
-        """Placeholder error handler to be overriden as needed.
-        Can raise a custom class Exception or anything else."""
-        self.teardown(from_error=True)
-        sys.exit(1)
+    def set_integrity_field(self, integrity_field=None):
+        """Set a custom IntegrityField, if not set, will default to {script_name}_{date}."""
+        if integrity_field: self.integrity_field = integrity_field; return
+        script_name = self.script_name
+        start_date = self._pst_start.date()
+        self.integrity_field = '%s_%s' % (script_name, start_date)
 
-    def run_query(self, sql, incremental_field=None):
-        """This will run the DB query and save that to the BQ table.
-        It will also tack-on the incremental WHERE clause, if needed."""
-        TABLE_NAME = self.script_name
-        
-        # if an incremental field has been supplied, query to get the max value and add in a WHERE clause to the query
-        if incremental_field is not None:
-            cmd = subprocess.run("bq query --use_legacy_sql=False --format=csv 'SELECT MAX(%s) FROM `%s.%s`'" % ( 
-                incremental_field, BQ_DATASET_ID, TABLE_NAME), 
-                shell=True, stdout=subprocess.PIPE
-            )
-            incremental_field_max_value = cmd.stdout.decode().strip().split('\n')[1].replace('""','') or None
-            if incremental_field_max_value is not None:
-                sql = """SELECT * FROM (%s) _tmp WHERE %s > '%s'""" % (sql, incremental_field, incremental_field_max_value)
-        
-        # Run the query against our own db and save it to a local csv file in data/ (we use sed for some csv tab-escaping)
-        logger.info('Running SQL query...\n%s\n' % sql)
-        filepath = os.path.join(os.path.dirname(__file__), 'data', '%s.csv' % self.integrity_field)
-        logger.debug('Saving SQL results to file %s' % filepath)
-        cmd = subprocess.run('''mysql -b -u %s -h %s -p%s %s -e "%s" | sed -e 's/"/'"'/g" -e "s/''//g" > %s''' % (
-               os.environ['DB_USER'], os.environ['DB_HOST'], os.environ['DB_PASS'], os.environ['DB_NAME'], self.formatted_sql, filepath),
-               shell=True,
+
+
+    def set_logging(self, *args, **kwargs):
+        """Set up how the code should be logged. By default will log/print to stdout
+        and to a log file in var/$script_name.log"""
+        global logger;
+        logger = logging.getLogger(self.script_name)
+        logger.setLevel(logging.DEBUG)
+
+        # Stream handler -- act like print function
+        stream_handler = logging.StreamHandler()
+        stream_handler.formatter = logging.Formatter(
+            f'[{self.integrity_field}:pid:%(process)d' + ' %(asctime)s' + 
+            '] - %(levelname)s %(name)s:%(funcName)s:L%(lineno)s: %(message)s'
         )
-        if cmd.returncode == 0:
-            logger.info('Saved SQL results to csv file %s' %  filepath)
+        logger.addHandler(stream_handler)
+
+        # File handler
+        file_handler = logging.FileHandler(os.path.join(self._base_folder, 'var', '%s.log' % self.script_name))
+        file_handler.formatter = stream_handler.formatter
+        logger.addHandler(file_handler)
+        logger.debug('hello')
+
+
+
+    def connect(self, *args, **kwargs):
+        import pymysql
+        conn = pymysql.connect(user=os.environ['DB_USER'], password=os.environ['DB_PASS'], database=os.environ['DB_NAME'], host=os.environ['DB_HOST'], charset='utf8')
+        self.conn = conn
+        self.cursor = conn.cursor()
+
+
+
+    def check_if_should_run(self, force_run=False):
+        """By default, we will run if the $integrity_id isn't in the `proc` folder.
+        If 'force' is in sys.argv or force_run=True or force_run=True"""
+        force_run = (force_run is True) or ('force' in sys.argv)
+        fp_in_proc = [path for path in glob.glob(os.path.join(self._base_folder, 'proc/*/*'))
+                        if self.integrity_field in path]
+        # if not found, run
+        if (not fp_in_proc):
+            logger.info('No previous process found, running new script.')
+            return True
         else:
-            logger.info('Saving SQL results failed. Raising error handler.')
-            self.error_handler()
-
-
-    def save_to_bq(self, partition_on_field=None, csv_filepath=None):
-        """Read the local csv file and save to BQ"""
-        
-        TABLE_NAME = self.script_name
-        csv_filepath = csv_filepath or os.path.join(os.path.dirname(__file__), 'data', '%s.csv' % self.integrity_field)
-
-        logger.info('Saving CSV file to BigQuery...')
-        partition_arg = '' if not partition_on_field else '--time_partitioning_field=%s' % partition_on_field
-        cmd = subprocess.run(f'''bq load --null_marker="NULL" --field_delimiter=tab --skip_leading_rows=1 ''' +
-                             f'''--source_format=CSV {partition_arg} {BQ_DATASET_ID}.{TABLE_NAME} {csv_filepath} {self.schema}'''
-                             , shell=True)
-        if cmd.returncode == 0:
-            logger.info('Saved SQL results to BQ')
-        else:
-            logger.info('Saving SQL results to BQ failed. Raising error handler.')
-            self.error_handler()
-
-
-    def create_table(self, sql, partition_on_field=None):
-        """If the BQ table doesn't already exist, create it."""
-        existing_datasets = subprocess.check_output('bq ls %s' % BQ_DATASET_ID, shell=True) # in bytes
-        TABLE_NAME = self.script_name
-        if TABLE_NAME.encode() in (existing_datasets.split()):
-            logger.debug('BQ table %s already exists' % TABLE_NAME)
-        else:
-            logger.info('BQ table %s does not exist, creating new table.' % TABLE_NAME)
-            partition_arg = '' if not partition_on_field else '--time_partitioning_field=%s' % partition_on_field
-            cmd = subprocess.run(
-                    f'bq mk --table {partition_arg} {BQ_DATASET_ID}.{TABLE_NAME} {self.schema}', 
-                    shell=True, 
-                    stdout=subprocess.PIPE,
-            )
-            if cmd.returncode == 0:
-                logger.info('Created SQL table')
+            logger.info('Previous %s process found...' % ('running' if 'running' in fp_in_proc else 'completed'))
+            if (not force_run):
+                logger.info('Exiting script as `force` was not applied.')
+                return False
             else:
-                logger.info('Failed creating SQL table. Raising error handler.')
-                self.error_handler()
+                logger.info('`Force` applied, so running script anyways')
+                # if `force` is applied and we have a previously-running process, let's kill it
+                fp_in_proc = fp_in_proc[0]
+                previous_pid = int(os.path.basename(fp_in_proc).split('_')[0]) if 'running' in fp_in_proc else None
+                if previous_pid:
+                    try:
+                        os.kill(previous_pid, 9)
+                    except ProcessLookupError:
+                        pass
+                    os.remove(fp_in_proc)
+                return True
+
 
 
     def setup(self, sql, sql_args=None, partition_on_field=None):
@@ -229,78 +237,97 @@ class Warehouse:
         self.schema = SCHEMA
 
 
-    def set_script_name(self, name=None):
-        """This will set both the script name and table name. By default, filename of script."""
-        if name: self.script_name = name; return
-        script_name = [arg for arg in sys.argv if arg.endswith('.py')]
-        if not script_name: raise RuntimeError('Set a custom `script_name` method or run with a file arg')
-        self.script_name = script_name[0].split('_')[1].replace('.py','')
 
-
-    def set_integrity_field(self, integrity_field=None):
-        """Set a custom IntegrityField, if not set, will default to {script_name}_{date}."""
-        if integrity_field: self.integrity_field = integrity_field; return
-        script_name = self.script_name
-        start_date = self._pst_start.date()
-        self.integrity_field = '%s_%s' % (script_name, start_date)
-
-
-    def set_logging(self, *args, **kwargs):
-        """Set up how the code should be logged. By default will log/print to stdout
-        and to a log file in var/$script_name.log"""
-        global logger;
-        logger = logging.getLogger(self.script_name)
-        logger.setLevel(logging.DEBUG)
-
-        # Stream handler -- act like print function
-        stream_handler = logging.StreamHandler()
-        stream_handler.formatter = logging.Formatter(
-            f'[{self.integrity_field}:pid:%(process)d' + ' %(asctime)s' + 
-            '] - %(levelname)s %(name)s:%(funcName)s:L%(lineno)s: %(message)s'
-        )
-        logger.addHandler(stream_handler)
-
-        # File handler
-        file_handler = logging.FileHandler(os.path.join(self._base_folder, 'var', '%s.log' % self.script_name))
-        file_handler.formatter = stream_handler.formatter
-        logger.addHandler(file_handler)
-        logger.debug('hello')
-
-
-    def connect(self, *args, **kwargs):
-        import pymysql
-        conn = pymysql.connect(user=os.environ['DB_USER'], password=os.environ['DB_PASS'], database=os.environ['DB_NAME'], host=os.environ['DB_HOST'], charset='utf8')
-        self.conn = conn
-        self.cursor = conn.cursor()
-
-
-    def check_if_should_run(self, force_run=False):
-        """By default, we will run if the $integrity_id isn't in the `proc` folder.
-        If 'force' is in sys.argv or force_run=True or force_run=True"""
-        force_run = (force_run is True) or ('force' in sys.argv)
-        fp_in_proc = [path for path in glob.glob(os.path.join(self._base_folder, 'proc/*/*'))
-                        if self.integrity_field in path]
-        # if not found, run
-        if (not fp_in_proc):
-            logger.info('No previous process found, running new script.')
-            return True
+    def create_table(self, sql, partition_on_field=None):
+        """If the BQ table doesn't already exist, create it."""
+        existing_datasets = subprocess.check_output('bq ls %s' % BQ_DATASET_ID, shell=True) # in bytes
+        TABLE_NAME = self.script_name
+        if TABLE_NAME.encode() in (existing_datasets.split()):
+            logger.debug('BQ table %s already exists' % TABLE_NAME)
         else:
-            logger.info('Previous %s process found...' % ('running' if 'running' in fp_in_proc else 'completed'))
-            if (not force_run):
-                logger.info('Exiting script as `force` was not applied.')
-                return False
+            logger.info('BQ table %s does not exist, creating new table.' % TABLE_NAME)
+            partition_arg = '' if not partition_on_field else '--time_partitioning_field=%s' % partition_on_field
+            cmd = subprocess.run(
+                    f'bq mk --table {partition_arg} {BQ_DATASET_ID}.{TABLE_NAME} {self.schema}', 
+                    shell=True, 
+                    stdout=subprocess.PIPE,
+            )
+            if cmd.returncode == 0:
+                logger.info('Created SQL table')
             else:
-                logger.info('`Force` applied, so running script anyways')
-                # if `force` is applied and we have a previously-running process, let's kill it
-                fp_in_proc = fp_in_proc[0]
-                previous_pid = int(os.path.basename(fp_in_proc).split('_')[0]) if 'running' in fp_in_proc else None
-                if previous_pid:
-                    try:
-                        os.kill(previous_pid, 9)
-                    except ProcessLookupError:
-                        pass
-                    os.remove(fp_in_proc)
-                return True
+                logger.info('Failed creating SQL table. Raising error handler.')
+                self.error_handler()
+
+
+
+    def run_query(self, sql, incremental_field=None):
+        """This will run the DB query and save that to the BQ table.
+        It will also tack-on the incremental WHERE clause, if needed."""
+        TABLE_NAME = self.script_name
+        
+        # if an incremental field has been supplied, query to get the max value and add in a WHERE clause to the query
+        if incremental_field is not None:
+            cmd = subprocess.run("bq query --use_legacy_sql=False --format=csv 'SELECT MAX(%s) FROM `%s.%s`'" % ( 
+                incremental_field, BQ_DATASET_ID, TABLE_NAME), 
+                shell=True, stdout=subprocess.PIPE
+            )
+            incremental_field_max_value = cmd.stdout.decode().strip().split('\n')[1].replace('""','') or None
+            if incremental_field_max_value is not None:
+                sql = """SELECT * FROM (%s) _tmp WHERE %s > '%s'""" % (sql, incremental_field, incremental_field_max_value)
+        
+        # Run the query against our own db and save it to a local csv file in data/ (we use sed for some csv tab-escaping)
+        logger.info('Running SQL query...\n%s\n' % sql)
+        filepath = os.path.join(os.path.dirname(__file__), 'data', '%s.csv' % self.integrity_field)
+        logger.debug('Saving SQL results to file %s' % filepath)
+        cmd = subprocess.run('''mysql -b -u %s -h %s -p%s %s -e "%s" | sed -e 's/"/'"'/g" -e "s/''//g" > %s''' % (
+               os.environ['DB_USER'], os.environ['DB_HOST'], os.environ['DB_PASS'], os.environ['DB_NAME'], self.formatted_sql, filepath),
+               shell=True,
+        )
+        if cmd.returncode == 0:
+            logger.info('Saved SQL results to csv file %s' %  filepath)
+        else:
+            logger.info('Saving SQL results failed. Raising error handler.')
+            self.error_handler()
+
+
+
+    def save_to_bq(self, partition_on_field=None, csv_filepath=None):
+        """Read the local csv file and save to BQ"""
+        
+        TABLE_NAME = self.script_name
+        csv_filepath = csv_filepath or os.path.join(os.path.dirname(__file__), 'data', '%s.csv' % self.integrity_field)
+
+        logger.info('Saving CSV file to BigQuery...')
+        partition_arg = '' if not partition_on_field else '--time_partitioning_field=%s' % partition_on_field
+        cmd = subprocess.run(f'''bq load --null_marker="NULL" --field_delimiter=tab --skip_leading_rows=1 ''' +
+                             f'''--source_format=CSV {partition_arg} {BQ_DATASET_ID}.{TABLE_NAME} {csv_filepath} {self.schema}'''
+                             , shell=True)
+        if cmd.returncode == 0:
+            logger.info('Saved SQL results to BQ')
+        else:
+            logger.info('Saving SQL results to BQ failed. Raising error handler.')
+            self.error_handler()
+
+
+
+    def teardown(self, from_error=False):
+        """What to do at the end of the script, for example, to send
+        an email or remove one of the data or process files."""
+        # Remove data file?
+        pass # keep for now -- easier for debugging to start
+
+        # Remove running pid file?
+        if self._lockfile: os.remove(self._lockfile)
+
+        # Add a completed file?
+        if not from_error:
+            completed_filepath = f'{self._base_folder}/proc/completed/{self.integrity_field}'
+            Path(f'{self._base_folder}/proc/completed/{self.integrity_field}').touch()
+
+        # Send an email or post to an endpoint?
+        pass
+
+
 
 
 
