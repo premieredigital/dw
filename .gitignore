@@ -2,7 +2,14 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.DS_STORE
+
 var/*
+!var/.keep
+
 proc/completed/*
+!proc/completed/.keep
 proc/running/*
+!proc/running/.keep
+
 data/*
+!data/.keep
