@@ -88,6 +88,7 @@ class Warehouse:
         """Placeholder error handler to be overriden as needed.
         Can raise a custom class Exception or anything else."""
         self.teardown(from_error=True)
+        logger.debug('*** SCRIPT EXITED AFTER %.4fs ***' % (time.time() - self._to))
         sys.exit(1)
 
 
@@ -263,6 +264,7 @@ class Warehouse:
     def run_query(self, sql, incremental_field=None):
         """This will run the DB query and save that to the BQ table.
         It will also tack-on the incremental WHERE clause, if needed."""
+        #return # for debugging!!!
         TABLE_NAME = self.script_name
         
         # if an incremental field has been supplied, query to get the max value and add in a WHERE clause to the query
@@ -299,12 +301,13 @@ class Warehouse:
 
         logger.info('Saving CSV file to BigQuery...')
         partition_arg = '' if not partition_on_field else '--time_partitioning_field=%s' % partition_on_field
-        cmd = subprocess.run(f'''bq load --null_marker="NULL" --field_delimiter=tab --skip_leading_rows=1 ''' +
+        cmd = subprocess.run(f'''bq load --null_marker="NULL" --field_delimiter=tab --skip_leading_rows=1 --max_bad_records=5 ''' +
                              f'''--source_format=CSV {partition_arg} {BQ_DATASET_ID}.{TABLE_NAME} {csv_filepath} {self.schema}'''
                              , shell=True)
         if cmd.returncode == 0:
             logger.info('Saved SQL results to BQ')
         else:
+            logger.info('Failed BQ command:\n%s' % cmd.args)
             logger.info('Saving SQL results to BQ failed. Raising error handler.')
             self.error_handler()
 
