@@ -13,14 +13,6 @@ logger = logging.getLogger(__name__) # placeholder
 BQ_PROJECT_ID = 'first-outlet-750'
 BQ_DATASET_ID = 'data_warehouse'
 
-# This requires $ bq command line tool, to download that, do:
-# $ sudo snap install google-cloud-sdk
-# And the first time you use it, you will need to authenticate:
-# $ gcloud auth login
-# And finally, to set the correct project, run
-# $ gcloud set project first-outlet-750
-
-
 class Warehouse:
     """
     See example.py for an example usage. The main method is called `run()`.
