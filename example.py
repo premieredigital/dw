@@ -1,3 +1,4 @@
+#!/usr/bin/env /home/ubuntu/bin/python
 from base import *
 import json
 import csv
@@ -5,6 +6,11 @@ import csv
 # source credentials && python example.py
 ## to delete: $ bq rm data_warehouse.historical_prices
 
+# quick fix in case nothing source
+if not os.environ.get('DB_HOST'):
+    for line in open(os.path.abspath(os.path.join(__file__, '..', 'credentials'))):
+        key,value = line.strip().split('=')
+        os.environ[key.replace('export','').strip()] = value.strip('"\'')
 
 SQL = """
 SELECT 
@@ -39,6 +45,7 @@ WHERE
 
 
 if __name__ == '__main__':
+    print ('running!')
     Warehouse().run(
         script_name = 'historical_prices',
         sql = SQL,
