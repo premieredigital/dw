@@ -21,11 +21,11 @@ SELECT
     a.price * 1E0 price,
     a.currency_code_id,
     a.is_future_release,
-    DATE(i.date_inserted) AS date_inserted,
     COALESCE(p.provider_title_id, i.provider_title_id) provider_title_id,
     t.eidr_1,
     t.eidr_2,
-    t.title_mpm mpm_id
+    t.title_mpm mpm_id,
+    DATE(i.date_inserted) AS date_inserted
 FROM
     main_iteminstance i
     JOIN main_territorypricing p ON p.item_id=i.id
@@ -42,7 +42,8 @@ def batch():
     w.set_logging()
     w.connect()
     w.setup(sql=SQL, partition_on_field='date')
-    schema = w.schema
+    schema = w.schema.replace(',date_inserted:DATE', '') # remove the last column which isn't used for the insert
+    print ('@@@', schema)
     cursor,conn=w.cursor,w.conn
     FIRST_DATE = datetime.date(2015,7,4) # first day we have entries in main_iteminstance
     LAST_DATE = datetime.date(2020, 5, 11) # first day we started historical prices
@@ -50,6 +51,7 @@ def batch():
     DATES_TO_PARSE = sorted([(FIRST_DATE + datetime.timedelta(days=n)) for n in range(DATE_RANGE+0)], reverse=True)
     
     # get the most-recent DB-data / map InstanceID+Territory+Offer (ignore date)
+    #  logger.debug('Running SQL')
     #  cursor.execute(SQL)
     #  res = cursor.fetchall()
     #  open('res.json','w').write(json.dumps(res))
@@ -99,7 +101,7 @@ def batch():
         # for updating all the InstanceData -- remove items that are before date_inserted and update date
         for key in sorted(data):
             data[key][0] = date
-            date_inserted = str(data[key][14])
+            date_inserted = str(data[key][-1])
             if date_inserted > date:
                 data[key][11] = None
 
@@ -114,16 +116,19 @@ def batch():
         logger.debug('3. saving to local csv file')
         csv_filepath = 'data/historical_%s.csv' % date
         with open(csv_filepath, 'w') as f:
-            writer = csv.writer(f, delimiter=',', quoting=csv.QUOTE_MINIMAL)
+            writer = csv.writer(f, delimiter='\t')
             for row_key in data.keys():
-                row = [item or '' for item in data[row_key][:-1]] # set null = ''
-                if row[11] is None: continue
+                row = [str(item or 'NULL').replace('\t', ' ').replace('\n', ' ').replace('"', "'").replace("''","") for item in data[row_key][:-1]] # set null = ''
+                if not row[10]: continue # no offer
+                if row[11] is None: continue # price is None
                 row[13] = 1 if str(value).lower() in ('1', 'true') else 0
                 writer.writerow(row)
 
-        #  # save to bq and enter in an entry in the DB
+          # save to bq and enter in an entry in the DB
         logger.debug('4. saving local csv to bq')
-        cmd = subprocess.call('''bq load --source_format=CSV --time_partitioning_field=date data_warehouse.historical_prices %s %s''' % (csv_filepath, schema), shell=True)
+        cmd_as_str = '''bq load  --null_marker="NULL" --max_bad_records=5 --source_format=CSV --time_partitioning_field=date --field_delimiter=tab data_warehouse.historical_prices %s %s''' % (csv_filepath, schema)
+        print ('***', cmd_as_str)
+        cmd = subprocess.call(cmd_as_str, shell=True)
         if cmd == 0:
             logger.debug('Saved SQL results to BQ')
             os.remove(csv_filepath)
@@ -131,6 +136,7 @@ def batch():
             conn.commit()
             logger.debug('Done!')
         else:
+            print (cmd)
             logger.debug('Failed BQ save')
 
 
