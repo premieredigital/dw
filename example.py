@@ -1,16 +1,49 @@
 from base import *
-# Make sure the os variables are added, for example: DB_USER, DB_PASS, DB_NAME, DB_HOST
-# This example has a LIMIT applied, but this is only so it will run faster -- a LIMIT probably should not be applied.
+import json
+import csv
+
+# source credentials && python example.py
+## to delete: $ bq rm data_warehouse.historical_prices
+
+
+SQL = """
+SELECT 
+    DATE(CONVERT_TZ(NOW(), 'UTC', 'America/Los_Angeles')) AS date, 
+    i.id instance_id, 
+    i.master_id master_id,
+    i.name,
+    i.content_type_id, 
+    i.release_year,
+    i.provider_id,
+    platform_type_id,
+    territory_id,
+    p.store_url,
+    a.code,
+    a.price,
+    a.currency_code_id,
+    a.is_future_release,
+    DATE(i.date_inserted) AS date_inserted,
+    COALESCE(p.provider_title_id, i.provider_title_id) provider_title_id,
+    t.eidr_1,
+    t.eidr_2,
+    t.title_mpm mpm_id
+FROM 
+    main_iteminstance i 
+    JOIN main_territorypricing p ON p.item_id=i.id 
+    INNER JOIN main_territorypricingavail a ON a.tp_id=p.id
+    LEFT OUTER JOIN _tracktitle t ON (i.provider_title_id=t.title_id)
+WHERE 
+    i.content_type_id IN ('movie', 'movie bundle', 'tv season')
+#LIMIT 10
+"""
+
+
 if __name__ == '__main__':
     Warehouse().run(
         script_name = 'historical_prices',
-        sql = """SELECT DATE(CONVERT_TZ(NOW(), 'UTC', 'America/Los_Angeles')) AS date,
-                   name, content_type_id, release_year, i.provider_id, platform_type_id,
-                   territory_id, p.store_url, a.code, a.price, a.currency_code_id
-                 FROM main_iteminstance i JOIN main_territorypricing p ON p.item_id=i.id JOIN main_territorypricingavail a ON a.tp_id=p.id
-                 WHERE content_type_id IN ('movie', 'movie bundle')""",
+        sql = SQL,
         sql_args = None,
-        partition_on_field = 'date',
-        incremental_field = 'date'
-
+        partition_on_field = 'date'
     )
+
+

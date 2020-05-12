@@ -137,7 +137,7 @@ class Warehouse:
         # Stream handler -- act like print function
         stream_handler = logging.StreamHandler()
         stream_handler.formatter = logging.Formatter(
-            f'[{self.integrity_field}:pid:%(process)d' + ' %(asctime)s' + 
+            f'[{self.integrity_field or ""}:pid:%(process)d' + ' %(asctime)s' + 
             '] - %(levelname)s %(name)s:%(funcName)s:L%(lineno)s: %(message)s'
         )
         logger.addHandler(stream_handler)
@@ -219,6 +219,7 @@ class Warehouse:
             1:   'INT64',
             246: 'NUMERIC',
             4:   'NUMERIC',
+            5:   'NUMERIC',
             10:  'DATE',
             12:  'DATETIME',
             7:   'DATETIME',
@@ -228,6 +229,7 @@ class Warehouse:
         self.cursor.execute('SELECT * FROM (%s) _tbl LIMIT 0' % (sql,))
         SCHEMA = ','.join(['%s:%s' % (item[0], TYPE_CODE_TO_BQ_TYPE[item[1]]) for item in self.cursor.description])
         self.schema = SCHEMA
+        print (self.schema)
 
 
 
@@ -240,6 +242,8 @@ class Warehouse:
         else:
             logger.info('BQ table %s does not exist, creating new table.' % TABLE_NAME)
             partition_arg = '' if not partition_on_field else '--time_partitioning_field=%s' % partition_on_field
+            print (partition_arg)
+    	
             cmd = subprocess.run(
                     f'bq mk --table {partition_arg} {BQ_DATASET_ID}.{TABLE_NAME} {self.schema}', 
                     shell=True, 
